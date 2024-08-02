@@ -1,10 +1,15 @@
 import requests
+import sys
+import threading
+
+from minimax import next_move_minimax
+from naive import naive_evaluate_position
 
 root_url = "http://light-bikes.inseng.net"
 
 
 def create_test_game(
-    add_server_bot=True, board_size=25, num_players=2, server_bot_difficulty=2
+    add_server_bot=True, board_size=25, num_players=2, server_bot_difficulty=3
 ):
     endpoint = f"{root_url}/games"
 
@@ -46,12 +51,13 @@ def join_game(game_id, player_name):
 
 
 def move(game_id, player_id, x, y):
+    print("move sent")
     endpoint = f"{root_url}/games/{game_id}/move"
     params = {"playerId": player_id, "x": x, "y": y}
 
     response = requests.post(endpoint, params=params)
     if response.status_code == 200:
-        return response.json()
+        return response.json()[0]
     else:
         print(f"Unexpected status code: {response.status_code}")
         print(response.json())
@@ -59,7 +65,7 @@ def move(game_id, player_id, x, y):
 
 
 # determine the next move
-def next_move(board, current_x, current_y):
+def next_move_simple(board, current_x, current_y):
     bestMove = None
     best_score = -float("inf")
     rows, cols = len(board), len(board[0])
@@ -73,94 +79,73 @@ def next_move(board, current_x, current_y):
 
     for x, y in possible_moves:
         if 0 <= x < rows and 0 <= y < cols and board[x][y] is None:
-            score = evaluate_move(board, x, y)
+            score = naive_evaluate_position(board, x, y)  # This is the line to change
             if score > best_score:
                 bestMove = (x, y)
                 best_score = score
-    print("best score", best_score)
+
+    if bestMove == None:
+        print("board", board)
+        print("current_x", current_x)
+        print("current_y", current_y)
     return bestMove
 
 
-# 'objective' function
-#  evaluate the move based on the distance to the nearest wall and the number of free cells
-def evaluate_move(board, x, y):
-    min_distance = min_wall_distance(board, x, y)
-    free_cells = sum(
-        [
-            count_free_cells(board, x, y, 0, 1),  # right
-            count_free_cells(board, x, y, 0, -1),  # left
-            count_free_cells(board, x, y, 1, 0),  # down
-            count_free_cells(board, x, y, -1, 0),  # up
-        ]
-    )
+def play_game(game_id=None, player_name="Riley!", difficulty=3):
+    if game_id is None:
+        game = create_test_game(server_bot_difficulty=difficulty)
+        game_id = game["id"]
+    else:
+        print(f"Joining existing game with ID: {game_id}")
 
-    return min_distance + free_cells
+    res = join_game(game_id, player_name)
 
+    # Get initial game state
+    game_response = show_game(game_id)
+    my_id = game_response["current_player"]["id"]
+    print(f"My player ID: {my_id}")
 
-# count the number of free cells in a given direction
-def count_free_cells(board, x, y, dx, dy):
-    rows, cols = len(board), len(board[0])
-    max_depth = 5
-    count = 0
-    for i in range(1, max_depth + 1):
-        newx, newy = x + i * dx, y + i * dy
-        if 0 <= newx < rows and 0 <= newy < cols and board[newx][newy] is None:
-            count += 1
-        else:
+    while True:
+        # Check if the game is over
+        if game_response["winner"] is not None:
             break
-    return count
+
+        # Check if it's my turn
+        if game_response["current_player"]["id"] != my_id:
+            game_response = show_game(game_id)
+            continue
+
+        current_board_state = game_response["board"]
+        my_x = game_response["current_player"]["x"]
+        my_y = game_response["current_player"]["y"]
+
+        next_move = next_move_minimax(current_board_state, my_x, my_y)
+        if next_move is None:
+            next_move = next_move_simple(current_board_state, my_x, my_y)
+
+        new_x, new_y = next_move
+        game_response = move(game_id, my_id, new_x, new_y)
+
+    print("Game over. Winner:", game_response["winner"])
 
 
-# calculate the distance to the nearest wall or color
-def min_wall_distance(board, x, y):
-    rows, cols = len(board), len(board[0])
-    min_distance = float("inf")
-    for i in range(rows):
-        for j in range(cols):
-            if board[i][j] is not None:
-                distance = abs(x - i) + abs(y - j)
-                min_distance = min(min_distance, distance)
-    return min_distance
+def run_multiple_games(num_games):
+    threads = []
+    for i in range(num_games):
+        thread = threading.Thread(
+            target=play_game, args=(None, f"bot_difficulty_{i+1}", i + 1)
+        )
+        threads.append(thread)
+        thread.start()
+
+    # Wait for all games to complete
+    for thread in threads:
+        thread.join()
 
 
-# create a test game
-game = create_test_game()
-game_id = game["id"]
-
-# join the game
-res = join_game(game_id, "test")
-print(res)
-
-game_response = show_game(game_id)
-
-
-current_board_state = game_response["board"]
-players = game_response["players"]
-my_id = game_response["current_player"]["id"]
-
-while game_response["winner"] is None:
-    # get the current game state
-    game_response = show_game(game_id)
-    current_board_state = game_response["board"]
-    players = game_response["players"]
-
-    # check if it's my turn
-    if game_response["current_player"]["id"] != my_id:
-        continue
-
-    # check if the game is over
-    if game_response["winner"] is not None:
-        break
-
-    # now it's my turn
-    my_x = game_response["current_player"]["x"]
-    my_y = game_response["current_player"]["y"]
-
-    # get the next move
-    new_x, new_y = next_move(current_board_state, my_x, my_y)
-
-    # make the move
-    move_response = move(game_id, my_id, new_x, new_y)
-    game_response = show_game(game_id)
-
-print("winner: ", game_response["winner"])
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        game_id = sys.argv[1]
+        play_game(game_id)
+    else:
+        run_multiple_games(1)
